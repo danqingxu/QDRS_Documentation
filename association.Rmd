@@ -1,0 +1,104 @@
+---
+title: "Gene-based association test"
+author: "Demo"
+date: '2020-06-12'
+output: html_document
+---
+
+# Association tests
+
+### Import packages
+
+Install required packages if missing.
+
+```{r install}
+# install required packages
+pkgs = c("dplyr", "Matrix", "SPAtest", "CompQuadForm", "SKAT", "knitr")
+pkgs.na = pkgs[!pkgs %in% installed.packages()[, "Package"]]
+if (length(pkgs.na) > 0) {
+  install.packages(pkgs.na, dependencies = TRUE)
+}
+```
+
+Import packages, scripts, and datasets including phenotypes (Y), covariates (X), genotypes (G), and functional annotations (CADD, PolyPhen-2).
+
+```{r import}
+library(dplyr)
+library(Matrix)
+library(SPAtest)
+library(CompQuadForm)
+library(SKAT)
+library(knitr)
+options(scipen = 999)
+
+source("func.R")
+
+load("demo.Rdata")
+```
+
+### Null model
+
+Fit null model for regression.
+Dateset: phenotypes (Y), covariates (X), and individual identifiers (id)
+
+```{r null-model}
+# GLM fit family (inverse.gaussian)
+Y = (Y - min(Y))/(max(Y) - min(Y)) + 1
+
+# null model for regression
+set.seed(256)
+result.prelim = KS.prelim(Y = Y, X = X, id = id, out_type = "C", B = 1000, model = "inverse.gaussian")
+```
+
+### Gene test
+
+Genotype matrix (G) includes genotype calls for all the sites within a given gene (region). Generate variant-weights based on MAC, MAF, CADD, and PolyPhen-2.
+
+```{r weights}
+# minor allele frequency and minor allele count
+MAF = colMeans(G)/2
+MAC = colSums(G)
+MAF.threshold = 0.01
+
+# weight using MAF
+window.matrix = Matrix(matrix(data = 1, nrow = ncol(G), ncol = 1))
+if (sum(MAC) < 5 | ncol(G) < 2) {
+  window.matrix = window.matrix * 0
+}
+
+weight.matrix = cbind(MAC<5, (MAF<MAF.threshold&MAC>=5)*dbeta(MAF,1,25), (MAF>=MAF.threshold)*dbeta(MAF,1,25))
+colnames(weight.matrix) = c("MAC<5", paste0("MAF<", MAF.threshold, "&MAC>=5&Beta"), paste0("MAF>=", MAF.threshold ,"&Beta"))
+
+# weight using CADD
+colnames(CADD) = paste0("MAF<", MAF.threshold, "&MAC>=5&CADD")
+weight.matrix = cbind(weight.matrix,(MAF<MAF.threshold&MAC>=5)*CADD)
+
+# weight using PolyPhen-2
+colnames(polyphen) = paste0("MAF<", MAF.threshold, "&MAC>=5&Polyphen")
+weight.matrix = cbind(weight.matrix,(MAF<MAF.threshold&MAC>=5)*polyphen)
+
+# all weights
+weight.matrix = Matrix(weight.matrix)
+```
+
+Run burden tests and SKAT tests integrating different weights. 
+Different tests are aggregated using Cauchy combination. 
+
+```{r association-tests}
+fit = KS_test(G, MAF, MAC, result.prelim, window.matrix, weight.matrix)
+```
+
+### Results
+
+Save summary statistics
+
+```{r summary-statistics}
+# save results
+sumstats = data.frame(Gene = gene, Chr = paste0(chr), Start = paste0(start), End = paste0(end), p.Cauchy.all = fit$p.KS, p.Cauchy.common = fit$p.KS.common, p.Cauchy.rare = fit$p.KS.rare, fit$p.individual, stringsAsFactors = F, check.names = F)
+
+kable(select(sumstats, Gene:p.Cauchy.all), col.names = c("Gene", "Chr", "Start", "End", "P-value"), caption = paste0("Summary statistics for ", gene), digits = 10, format.args = list(scientific = T))
+
+write.table(x = sumstats, file = paste0("demo.sumstats.tsv"), sep = "\t", quote = F, row.names = F, col.names = T)
+```
+
+
